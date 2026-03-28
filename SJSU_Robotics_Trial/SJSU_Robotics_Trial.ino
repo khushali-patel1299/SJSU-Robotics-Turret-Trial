@@ -1,117 +1,108 @@
 #include <Wire.h>
-#include<Servo.h>
+#include <Servo.h>
 
-const int MPU_ADDR = 0x68; // I2C address of the MPU-6050
+const int MPU_ADDR = 0x68; 
 const int NUM_SAMPLES = 100;
-int ySamples[NUM_SAMPLES], zSamples[NUM_SAMPLES];
-int i = 0;
+
+class TurretAxis {
+  private:
+    int16_t samples[NUM_SAMPLES];
+    int index = 0;
+    long axisSum = 0;
+    int lastAngle = -100;
+    Servo motor;
+    int motorPin;
+
+  public:
+    TurretAxis(int pin) : motorPin(pin) {}
+    void init() { motor.attach(motorPin); motor.write(90); }
+    void addSample(int16_t newVal) {
+      axisSum -= samples[index];
+      samples[index] = newVal;
+      axisSum += samples[index];
+      index = (index + 1) % NUM_SAMPLES;
+    }
+    float getMean() { return (float)axisSum / (float)NUM_SAMPLES; }
+    float getStdDev() {
+      float meanVal = getMean();
+      float varianceSum = 0;
+      for (int j = 0; j < NUM_SAMPLES; j++) {
+        float diff = (float)samples[j] - meanVal;
+        varianceSum += diff * diff;
+      }
+      return sqrt(varianceSum / (float)NUM_SAMPLES);
+    }
+    void commandMotor(int targetAngle) {
+      int constrainedAngle = constrain(targetAngle, 0, 180);
+      if (abs(constrainedAngle - lastAngle) > 3) {
+        motor.write(constrainedAngle);
+        lastAngle = constrainedAngle;
+      }
+    }
+};
+
+TurretAxis axisY(9);
+TurretAxis axisZ(10);
+
 int sr_no = 0;
-float sumY = 0, sumZ = 0;
-int lastAngleY = -100 , lastAngleZ = -100;
-
-//servo motor variables
-Servo servo1;
-Servo servo2;
-
-//Serial monitor delayed output traker
 unsigned long lastPrintTime = 0;
+
+// Sample Rate Variables
+unsigned long sampleCounter = 0;
+unsigned long lastSampleTime = 0;
+float currentSampleRate = 0;
 
 void setup() {
   Serial.begin(9600);
   Wire.begin();
-  
-  // Wake up the MPU-6050
   Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x6B); // Power Management register
-  Wire.write(0);    // Wake up
+  Wire.write(0x6B); 
+  Wire.write(0);    
   Wire.endTransmission(true);
-
-  //Servo motor connections
-  servo1.attach(9);
-  servo2.attach(10);
-
-  //test moverment
-  servo1.write(0); delay(1000);
-  servo2.write(0); delay(1000);
-  servo1.write(90); delay(1000);
-  servo2.write(90); delay(1000);
-  servo1.write(180); delay(1000);
-  servo2.write(180); delay(1000);
-  
-  delay(300); // Stabilization time
+  axisY.init();
+  axisZ.init();
+  delay(500); 
 }
 
 void loop() {
-    
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x3B); // Start reading from ACCEL_XOUT_H
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 6, true); // Request 6 bytes (2 per axis)
+  sampleCounter++; // Increment every loop
 
-  // Read high and low bytes for each axis
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x3B);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU_ADDR, 6, true);
+
   int16_t xAccel = Wire.read() << 8 | Wire.read();
   int16_t yAccel = Wire.read() << 8 | Wire.read();
-  int16_t zAccel = Wire.read() << 8 | Wire.read();  
+  int16_t zAccel = Wire.read() << 8 | Wire.read();
 
-  // Circular Buffer
-  //removing existing value from sum
-  sumY -= ySamples[i];
-  sumZ -= zSamples[i];
+  axisY.addSample(yAccel);
+  axisZ.addSample(zAccel);
 
-  //replacing current value with a new value
-  ySamples[i] = yAccel;
-  zSamples[i] = zAccel;
+  float meanY = axisY.getMean();
+  float meanZ = axisZ.getMean();
+  int angleY = map((int)meanY, -17000, 17000, 0, 180);
+  int angleZ = map((int)meanZ, -17000, 17000, 0, 180);
 
-  //recalculating sum with new value
-  sumY += ySamples[i];
-  sumZ += zSamples[i];
+  axisY.commandMotor(angleY);
+  axisZ.commandMotor(angleZ);
 
-  i = (i+1) % NUM_SAMPLES;  //index update
-  
-  float meanY , StdDev_Y , meanZ , StdDev_Z , variance_Y = 0 , variance_Z = 0;;
+  // Calculate Sample Rate and Print every 1000ms (1 second)
+  if (millis() - lastSampleTime >= 1000) {
+    currentSampleRate = sampleCounter;
+    sampleCounter = 0;
+    lastSampleTime = millis();
+  }
 
-  meanY = sumY / NUM_SAMPLES;
-  meanZ = sumZ / NUM_SAMPLES;
-
-
-  // Only print to Serial Monitor once every 400ms for readability, without slowing down the code
   if (millis() - lastPrintTime > 400) {
-    for( int j = 0 ; j < NUM_SAMPLES ; j++) {
-    variance_Y += pow(ySamples[j] - meanY , 2);
-    variance_Z += pow(zSamples[j] - meanZ , 2);
-    }
-
-    StdDev_Y = sqrt(variance_Y / NUM_SAMPLES);
-    StdDev_Z = sqrt(variance_Z / NUM_SAMPLES);
-    
     Serial.print(++sr_no);
-    Serial.print(")  X: "); Serial.print(xAccel);
-    Serial.print(" | Y: "); Serial.print(yAccel);
-    Serial.print(" | Z: "); Serial.print(zAccel);
-    Serial.print("   | Mean Y: "); Serial.print(meanY);
-    Serial.print(" | StdDev Y: "); Serial.print(StdDev_Y);
-    Serial.print(" | Mean Z: "); Serial.print(meanZ);
-    Serial.print(" | StdDev Z: "); Serial.print(StdDev_Z);
-    Serial.println(" ");
+    Serial.print(") Hz: "); Serial.print(currentSampleRate); // SAMPLE RATE
+    Serial.print(" | X: "); Serial.print(xAccel);
+    Serial.print(" | Mean Y: "); Serial.print(meanY);
+    Serial.print(" | StdDev Y: "); Serial.print(axisY.getStdDev());
+    Serial.print(" | Sample Rate (Hz): "); Serial.print(currentSampleRate);
+    Serial.println();
     lastPrintTime = millis();
   }
-
-
-  //mapping mean of I2C data with degrees to move motors
-  int angleY = map(meanY, -17000, 17000, 0, 180);
-  int angleZ = map(meanZ, -17000, 17000, 0, 180);
-
-
-  // Only update if the new target is more than 3 degrees away from the last position
-  if (abs(angleY - lastAngleY) > 3) {
-    servo1.write(constrain(angleY, 0, 180));
-    lastAngleY = angleY;
-  }
-  if (abs(angleZ - lastAngleZ) > 3) {
-    servo2.write(constrain(angleZ, 0, 180));
-    lastAngleZ = angleZ;
-  }
-
-  delay(10); //breathing room delay for I2C 
-
+  delay(10); 
 }
